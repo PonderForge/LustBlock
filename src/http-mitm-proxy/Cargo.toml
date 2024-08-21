@@ -1,0 +1,38 @@
+[package]
+name = "http-mitm-proxy"
+version = "0.8.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+tokio = { version = "1.34.0", features = [
+    "macros",
+    "rt",
+    "rt-multi-thread",
+    "parking_lot",
+    "io-util",
+    "net",
+] }
+hyper = { version = "=1.0.1", features = ["http1", "http2", "server", "client"] }
+futures = "0.3.29"
+bytes = "1.5.0"
+http-body-util = "0.1.0"
+rcgen = "0.13.1"
+rustls = "0.23.3"
+tokio-rustls = "0.26.0"
+tokio-native-tls = "0.3.1"
+tracing = "0.1.40"
+hyper-util = { version = "0.1.1", features = ["tokio"] }
+native-tls = { version = "0.2.12", features = ["alpn"] }
+thiserror = "1.0.62"
+ort = { version = "2.0.0-rc.2", features = ["cuda", "load-dynamic"] }
+
+[dev-dependencies]
+axum = { version = "0.7.2", features = ["http2"] }
+axum-server = { version = "0.6.0", features = ["tls-rustls"] }
+clap = { version = "4.4.16", features = ["derive"] }
+rcgen = { version = "0.13.1", features = ["x509-parser"] }
+reqwest = { version = "0.12.3", features = ["native-tls-alpn"] }
+rustls21 = { package = "rustls", version = "0.21" }
+tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
