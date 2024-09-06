@@ -5,7 +5,7 @@
 If you want to use it, check out the releases first, we compile for CUDA 12 and CPU on both Linux and Windows.
 1. Go to our latest release and download it.
 - On Linux, use: `wget https://github.com/PonderForge/LustBlock/releases/download/v{version}/{os}-{execution provider}.tar.gz -o lustblock.tar.gz`
-- On Windows, use: `curl https://github.com/PonderForge/LustBlock/releases/download/v{version}/{os}-{execution provider}.zip -o lustblock.tar.gz`\
+- On Windows, use: `curl https://github.com/PonderForge/LustBlock/releases/download/v{version}/{os}-{execution provider}.zip -o lustblock.zip`\
 (Replace the brackets with what your machine uses)
 2. Unzip/Extract it using your favorite extractor
 - On Linux, it looks like this: `tar -xvzf lustblock.tar.gz`
