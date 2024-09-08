@@ -17,3 +17,5 @@ hyper = { version = "=1.0.1", features = ["http1", "http2", "server", "client"] 
 http-body-util = "0.1.0"
 bytes = "1.7.1"
 rand = "0.8.5"
+serde_json = "1.0.128"
+dirs-next = "2.0.0"

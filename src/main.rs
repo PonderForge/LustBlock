@@ -1,4 +1,4 @@
-use std::{io::Cursor, path::{Path, PathBuf}, time::Instant};
+use std::{io::Cursor, path::{Path, PathBuf}, str::FromStr, time::Instant};
 use bytes::BytesMut;
 use clap::Args;
 use http_body_util::{BodyExt, Full};
@@ -6,10 +6,12 @@ use http_mitm_proxy::{DefaultClient, MitmProxy};
 use hyper::header::HeaderValue;
 use hyper::Response;
 use hyper::body::Bytes;
-use ort::{inputs, CUDAExecutionProvider, GraphOptimizationLevel, Session, SessionOutputs, CPUExecutionProvider};
+use ort::{inputs, CPUExecutionProvider, CUDAExecutionProvider, GraphOptimizationLevel, Session, SessionOutputs};
 use tracing_subscriber::EnvFilter;
 use image::{imageops::FilterType, GenericImageView};
 use ndarray::Array;
+use serde_json::Value;
+use dirs_next::config_dir;
 
 mod data;
 
@@ -23,25 +25,56 @@ struct ExternalCert {
     private_key: PathBuf,
 }
 
-const HENTAI_DETECT_THREASHOLD: f32 = 0.8;
-const PORN_DETECT_THREASHOLD: f32 = 0.89;
-const SEXY_DETECT_THREASHOLD: f32 = 0.98;
+//Main Config from main.conf
+struct Config {
+    ip: String,
+    port: u16,
+    threasholds: Threasholds,
+    threads: usize,
+    cuda: bool
+}
+
+//Threasholds for each of the NSFW classes
+struct Threasholds {
+    porn: f64,
+    sexy: f64,
+    hentai: f64
+}
 
 
 #[tokio::main]
 async fn main() {
     println!("Initializing LustBlock...");
+    let configdir = format!("{}/LustBlock/", dirs_next::config_dir().unwrap().to_str().unwrap());
+    std::fs::create_dir_all(&configdir).unwrap();
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env())
         .init();
+
+    //Read Config File
+    let config_file = std::fs::read_to_string(Path::new("config.json")).unwrap();
+    let v: Value = serde_json::from_str(&config_file).unwrap();
+    let config = Config {
+        ip: String::from_str(v["ip"].as_str().unwrap()).unwrap(),
+        port: v["port"].as_u64().unwrap() as u16,
+        threasholds: Threasholds {
+            porn: v["detect_threasholds"]["porn"].as_f64().unwrap(),
+            sexy: v["detect_threasholds"]["sexy"].as_f64().unwrap(),
+            hentai: v["detect_threasholds"]["hentai"].as_f64().unwrap(),
+        },
+        threads: v["threads"].as_u64().unwrap() as usize,
+        cuda: v["cuda"].as_bool().unwrap()
+    };
+
+    //Initialize Onnx Runtime
     let ort_init = ort::init()
-		.with_execution_providers([CUDAExecutionProvider::default().build(), CPUExecutionProvider::default().build()])
+		.with_execution_providers([if config.cuda {CUDAExecutionProvider::default().build()} else {CPUExecutionProvider::default().build()}])
 		.commit();
     if ort_init.is_err() {
         panic!("ONNX was not correctly initalized! :(");
     }
-    let public_key = std::fs::read_to_string(Path::new("pub.crt"));
-    let private_key = std::fs::read_to_string(Path::new("priv.crt"));
+    let public_key = std::fs::read_to_string(Path::new(format!("{}pub.crt", configdir).as_str()));
+    let private_key = std::fs::read_to_string(Path::new(format!("{}priv.crt", configdir).as_str()));
     //Check if the HTTPS keys exist
     let root_cert = if !public_key.is_err() && !private_key.is_err() {
         // If so, Use existing key
@@ -55,7 +88,7 @@ async fn main() {
         rcgen::CertifiedKey { cert, key_pair }
     } else {
         //Else, make and save them
-        make_root_cert()
+        make_root_cert(&configdir)
     };
 
     let proxy = MitmProxy::new(
@@ -63,7 +96,7 @@ async fn main() {
         Some(root_cert),
         // This is the main Session for the NSFW detector
         Session::builder().unwrap().with_optimization_level(GraphOptimizationLevel::Level1).unwrap()
-        .with_inter_threads(4).unwrap().commit_from_file("model.onnx").unwrap()
+        .with_inter_threads(config.threads).unwrap().commit_from_file("model.onnx").unwrap()
     );
 
     let client = DefaultClient::new(
@@ -74,7 +107,7 @@ async fn main() {
             .unwrap(),
     );
     let server = proxy
-        .bind(("127.0.0.1", 3003), move |_client_addr, req, detector| {
+        .bind((config.ip.clone(), config.port), move |_client_addr, req, detector| {
             let client = client.clone();
             async move {
                 let uri = req.uri().clone();
@@ -120,17 +153,21 @@ async fn main() {
                     let now = Instant::now();
                     let output_tensor: SessionOutputs = model.run(inputs!["input_1" => input.view()].unwrap()).unwrap();
                     let outputs = output_tensor["dense_3"].try_extract_tensor::<f32>().unwrap();
-                    println!("Elapsed: {:.2?}", now.elapsed());
+                    println!("  Elapsed: {:.2?}", now.elapsed());
                     let mut metrix: Vec<_> = Vec::new();
                     for output in outputs.rows() {
                         metrix = output.to_vec();
                     }
+                    println!("  Metrics: {:?}", metrix);
                     //Process Metrics
-                    if metrix[1] > HENTAI_DETECT_THREASHOLD || metrix[3] > PORN_DETECT_THREASHOLD || metrix[4] > SEXY_DETECT_THREASHOLD {
+                    if metrix[1] > config.threasholds.hentai as f32 || metrix[3] > config.threasholds.porn as f32 || metrix[4] > config.threasholds.sexy as f32 {
                         let replacement = image::open(Path::new("distraction.jpg")).unwrap().resize(replace_w, replace_h, FilterType::CatmullRom);
                         let mut bytes: Vec<u8> = Vec::new();
                         replacement.write_to(&mut Cursor::new(&mut bytes), if content_type == "image/png" {image::ImageFormat::Png} else if content_type == "image/webp" {image::ImageFormat::WebP} else {image::ImageFormat::Jpeg}).unwrap();
                         body = BytesMut::from(bytes.as_slice());
+                        println!("  Image is NSFW: Blocked")
+                    } else {
+                        println!("  Image is OK: Allowed")
                     }
                 }
 
@@ -143,7 +180,7 @@ async fn main() {
         .await
         .unwrap();
 
-    println!("HTTP Proxy is listening on http://127.0.0.1:3003");
+    println!("HTTP Proxy is listening on http://{}:{}", &config.ip, config.port);
 
     println!();
     println!("Trust the pub.crt cert if you want to use HTTPS");
@@ -155,7 +192,7 @@ async fn main() {
     server.await;
 }
 
-fn make_root_cert() -> rcgen::CertifiedKey {
+fn make_root_cert(configdir: &String) -> rcgen::CertifiedKey {
     let mut param = rcgen::CertificateParams::default();
 
     param.distinguished_name = rcgen::DistinguishedName::new();
@@ -171,7 +208,7 @@ fn make_root_cert() -> rcgen::CertifiedKey {
 
     let key_pair = rcgen::KeyPair::generate().unwrap();
     let cert = param.self_signed(&key_pair).unwrap();
-    let _ = std::fs::write(Path::new("pub.crt"), cert.pem());
-    let _ = std::fs::write(Path::new("priv.crt"), key_pair.serialize_pem());
+    let _ = std::fs::write(Path::new(format!("{}pub.crt", configdir).as_str()), cert.pem());
+    let _ = std::fs::write(Path::new(format!("{}priv.crt", configdir).as_str()), key_pair.serialize_pem());
     rcgen::CertifiedKey { cert, key_pair }
 }
