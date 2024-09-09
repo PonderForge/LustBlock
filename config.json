@@ -7,5 +7,5 @@
         "sexy" : 0.8
     },
     "threads": 12,
-    "cuda": true
+    "cuda": false
 }
