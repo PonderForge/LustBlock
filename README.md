@@ -20,7 +20,7 @@ You can run it using `cd lustblock && ./lustblock`
 - On Windows, follow [this tutorial](https://support.microsoft.com/en-us/windows/use-a-proxy-server-in-windows-03096c53-0554-4ffe-b6ab-8b1deee8dae1)
 - On Android, follow [this tutorial](https://proxyway.com/guides/android-proxy-settings)
 - On iOS, follow [this tutorial](https://libertyshield.kayako.com/article/32-manual-proxy-ios-iphone-and-ipad)
-2. Finally, to use HTTPS and not make your browser lose it, install the fake cert:
+2. Finally, to use HTTPS and not make your browser lose it, install pub.crt, a fake cert, which is in your OS's config directory, which is either `C:/Users/{user}/AppData/Roaming/LustBlock` or `/home/{user}/.config/LustBlock`:
 - On Ubuntu, follow [this tutorial](https://askubuntu.com/questions/73287/how-do-i-install-a-root-certificate/94861#94861)
 - On Windows, follow [this tutorial](https://web.archive.org/web/20160612045445/http://windows.microsoft.com/en-ca/windows/import-export-certificates-private-keys#1TC=windows-7)
 - On Android, follow [this tutorial](http://wiki.cacert.org/FAQ/ImportRootCert#Android_Phones_.26_Tablets)
