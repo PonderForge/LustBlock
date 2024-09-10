@@ -11,7 +11,7 @@
 3. Change into the release directory and run the main program
 You can run it using `cd lustblock && ./lustblock`
 ## Windows
-1. Download lustblock-setup.exe
+1. Download windows-x64-setup.exe
 2. Follow instructions through the prompts
 3. Skip Post install if you are only installing for your system
 ## Post Install
