@@ -1,4 +1,4 @@
-use std::{io::Cursor, path::{Path, PathBuf}, str::FromStr, time::Instant};
+use std::{io::Cursor, path::{Path, PathBuf}, str::FromStr, time::Instant, process::Command, cfg, sync::{Arc, atomic::{AtomicBool, Ordering},}, env};
 use bytes::BytesMut;
 use clap::Args;
 use http_body_util::{BodyExt, Full};
@@ -11,7 +11,7 @@ use tracing_subscriber::EnvFilter;
 use image::{imageops::FilterType, GenericImageView};
 use ndarray::Array;
 use serde_json::Value;
-use dirs_next::config_dir;
+use dirs_next;
 
 mod data;
 
@@ -31,7 +31,8 @@ struct Config {
     port: u16,
     threasholds: Threasholds,
     threads: usize,
-    cuda: bool
+    cuda: bool,
+    auto_settings: bool
 }
 
 //Threasholds for each of the NSFW classes
@@ -45,6 +46,8 @@ struct Threasholds {
 #[tokio::main]
 async fn main() {
     println!("Initializing LustBlock...");
+    let execpath = env::current_exe().unwrap();
+    let execdir = format!("{}/", execpath.parent().unwrap().to_str().unwrap());
     let configdir = format!("{}/LustBlock/", dirs_next::config_dir().unwrap().to_str().unwrap());
     std::fs::create_dir_all(&configdir).unwrap();
     tracing_subscriber::fmt()
@@ -52,20 +55,26 @@ async fn main() {
         .init();
 
     //Read Config File
-    let config_file = std::fs::read_to_string(Path::new("config.json")).unwrap();
+    let config_file = std::fs::read_to_string(Path::new(format!("{}config.json", execdir).as_str())).unwrap();
     let v: Value = serde_json::from_str(&config_file).unwrap();
     let config = Config {
+        //IP Address of the Proxy Server
         ip: String::from_str(v["ip"].as_str().unwrap()).unwrap(),
+        //Port of the Proxy Server
         port: v["port"].as_u64().unwrap() as u16,
+        //Prediction Threasholds
         threasholds: Threasholds {
             porn: v["detect_threasholds"]["porn"].as_f64().unwrap(),
             sexy: v["detect_threasholds"]["sexy"].as_f64().unwrap(),
             hentai: v["detect_threasholds"]["hentai"].as_f64().unwrap(),
         },
+        //Number of Threads to use 
         threads: v["threads"].as_u64().unwrap() as usize,
-        cuda: v["cuda"].as_bool().unwrap()
+        //Use the CUDA Execution Provider?
+        cuda: v["cuda"].as_bool().unwrap(),
+        //Auto Apply Settings at Runtime (Windows only)
+        auto_settings: v["auto_settings"].as_bool().unwrap()
     };
-
     //Initialize Onnx Runtime
     let ort_init = ort::init()
 		.with_execution_providers([if config.cuda {CUDAExecutionProvider::default().build()} else {CPUExecutionProvider::default().build()}])
@@ -88,6 +97,7 @@ async fn main() {
         rcgen::CertifiedKey { cert, key_pair }
     } else {
         //Else, make and save them
+        println!("Creating new Certficate...");
         make_root_cert(&configdir)
     };
 
@@ -96,7 +106,8 @@ async fn main() {
         Some(root_cert),
         // This is the main Session for the NSFW detector
         Session::builder().unwrap().with_optimization_level(GraphOptimizationLevel::Level1).unwrap()
-        .with_inter_threads(config.threads).unwrap().commit_from_file("model.onnx").unwrap()
+        .with_inter_threads(config.threads).unwrap().commit_from_file(format!("{}model.onnx", execdir).as_str()).unwrap(),
+        execdir
     );
 
     let client = DefaultClient::new(
@@ -107,7 +118,7 @@ async fn main() {
             .unwrap(),
     );
     let server = proxy
-        .bind((config.ip.clone(), config.port), move |_client_addr, req, detector| {
+        .bind((config.ip.clone(), config.port), move |_client_addr, req, detector, execdir| {
             let client = client.clone();
             async move {
                 let uri = req.uri().clone();
@@ -161,7 +172,7 @@ async fn main() {
                     println!("  Metrics: {:?}", metrix);
                     //Process Metrics
                     if metrix[1] > config.threasholds.hentai as f32 || metrix[3] > config.threasholds.porn as f32 || metrix[4] > config.threasholds.sexy as f32 {
-                        let replacement = image::open(Path::new("distraction.jpg")).unwrap().resize(replace_w, replace_h, FilterType::CatmullRom);
+                        let replacement = image::open(Path::new(format!("{}distraction.jpg", execdir.lock().unwrap().as_str()).as_str())).unwrap().resize(replace_w, replace_h, FilterType::CatmullRom);
                         let mut bytes: Vec<u8> = Vec::new();
                         replacement.write_to(&mut Cursor::new(&mut bytes), if content_type == "image/png" {image::ImageFormat::Png} else if content_type == "image/webp" {image::ImageFormat::WebP} else {image::ImageFormat::Jpeg}).unwrap();
                         body = BytesMut::from(bytes.as_slice());
@@ -180,16 +191,40 @@ async fn main() {
         .await
         .unwrap();
 
-    println!("HTTP Proxy is listening on http://{}:{}", &config.ip, config.port);
+    println!("HTTPS Proxy is listening on http://{}:{}", &config.ip, config.port);
 
     println!();
-    println!("Trust the pub.crt cert if you want to use HTTPS");
+
+    if config.auto_settings {
+        if cfg!(target_os = "windows") {
+            use windows_registry::*;
+            let proxy_set = CURRENT_USER.create("SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Internet Settings").unwrap();
+            proxy_set.set_string("ProxyServer", &format!("{}:{}", &config.ip, config.port));
+            proxy_set.set_u32("ProxyEnable", 1);
+            println!("Proxy added to Computer Network Stack");
+            println!("Enjoy a (sexual) temptation-less internet!");
+        }
+    } else {
+        if !cfg!(target_os = "windows") {
+            println!("Trust the pub.crt certificate if you want to use HTTPS on the device");
+        }
+        println!("Use the URL above in your proxy settings to apply ");
+        println!("Enjoy a (sexual) temptation-less internet!");
+    }
 
     /*
-        Save this cert to ca.crt and try it with curl like this:
+        Debug Test if you wish to not change your proxy settings
         curl -i https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcR8xF41_qUV3Kue3McuviMZmzj0FqCD7O2uEp0du0i7Hz4ZgpdJ --proxy 127.0.0.1:3003 --cacert ./pub.crt --ssl-revoke-best-effort
     */
+
+    unsafe{ register_close_handler(); }
     server.await;
+
+}
+
+#[link(name = "close", kind = "static")]
+extern "C" {
+    fn register_close_handler();
 }
 
 fn make_root_cert(configdir: &String) -> rcgen::CertifiedKey {
@@ -210,5 +245,12 @@ fn make_root_cert(configdir: &String) -> rcgen::CertifiedKey {
     let cert = param.self_signed(&key_pair).unwrap();
     let _ = std::fs::write(Path::new(format!("{}pub.crt", configdir).as_str()), cert.pem());
     let _ = std::fs::write(Path::new(format!("{}priv.crt", configdir).as_str()), key_pair.serialize_pem());
+    if cfg!(target_os = "windows") { 
+        println!("Adding to Root Certificate Store");
+        println!("{:?}", Command::new("cmd")
+        .args(["/C", format!("certutil -user -addstore Root {}pub.crt", configdir).as_str()])
+        .output()
+        .expect("failed to execute process"));
+    }
     rcgen::CertifiedKey { cert, key_pair }
 }

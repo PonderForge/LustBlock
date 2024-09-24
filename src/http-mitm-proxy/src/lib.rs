@@ -29,13 +29,14 @@ pub struct MitmProxy<C> {
     ///
     /// If None, proxy will just tunnel HTTPS traffic and will not observe HTTPS traffic.
     pub root_cert: Option<C>,
-    pub detector: Data<Mutex<Session>>
+    pub detector: Data<Mutex<Session>>,
+    pub execdir: Data<Mutex<String>>
 }
 
 impl<C> MitmProxy<C> {
     /// Create a new MitmProxy
-    pub fn new(root_cert: Option<C>, detector: Session) -> Self {
-        Self { root_cert, detector: Data::new(Mutex::new(detector)) }
+    pub fn new(root_cert: Option<C>, detector: Session, execdir: String) -> Self {
+        Self { root_cert, detector: Data::new(Mutex::new(detector)), execdir:  Data::new(Mutex::new(execdir))}
     }
 }
 
@@ -53,7 +54,7 @@ impl<C: Borrow<rcgen::CertifiedKey> + Send + Sync + 'static> MitmProxy<C> {
         B: Body<Data = Bytes, Error = E> + Send + Sync + 'static,
         E: std::error::Error + Send + Sync + 'static,
         E2: std::error::Error + Send + Sync + 'static,
-        S: Fn(SocketAddr, Request<Incoming>, Data<Mutex<Session>>) -> F + Send + Sync + Clone + 'static,
+        S: Fn(SocketAddr, Request<Incoming>, Data<Mutex<Session>>, Data<Mutex<String>>) -> F + Send + Sync + Clone + 'static,
         F: Future<Output = Result<Response<B>, E2>> + Send,
     {
         let listener = TcpListener::bind(addr).await?;
@@ -96,7 +97,7 @@ impl<C: Borrow<rcgen::CertifiedKey> + Send + Sync + 'static> MitmProxy<C> {
         service: S,
     ) -> Result<Response<BoxBody<Bytes, E>>, E2>
     where
-        S: Fn(SocketAddr, Request<Incoming>, Data<Mutex<Session>>) -> F + Send + Clone + 'static,
+        S: Fn(SocketAddr, Request<Incoming>, Data<Mutex<Session>>, Data<Mutex<String>>) -> F + Send + Clone + 'static,
         F: Future<Output = Result<Response<B>, E2>> + Send,
         B: Body<Data = Bytes, Error = E> + Send + Sync + 'static,
         E: std::error::Error + Send + Sync + 'static,
@@ -143,13 +144,15 @@ impl<C: Borrow<rcgen::CertifiedKey> + Send + Sync + 'static> MitmProxy<C> {
                         }
                     };
                     let detector = proxy.detector.clone();
+                    let execdir = proxy.execdir.clone();
                     let f = move |mut req: Request<_>| {
                         let connect_authority = connect_authority.clone();
                         let service = service.clone();
                         let detc2 = detector.clone();
+                        let execdir2 = execdir.clone();
                         async move {
                             inject_authority(&mut req, connect_authority.clone());
-                            service(client_addr, req, detc2).await
+                            service(client_addr, req, detc2, execdir2).await
                         }
                     };
                     let res = if client.get_ref().1.alpn_protocol() == Some(b"h2") {
@@ -186,7 +189,7 @@ impl<C: Borrow<rcgen::CertifiedKey> + Send + Sync + 'static> MitmProxy<C> {
             ))
         } else {
             // http
-            service(client_addr, req, proxy.detector.clone())
+            service(client_addr, req, proxy.detector.clone(), proxy.execdir.clone())
                 .await
                 .map(|res| res.map(|b| b.boxed()))
         }
