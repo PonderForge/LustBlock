@@ -1,4 +1,4 @@
-use std::{io::Cursor, path::{Path, PathBuf}, str::FromStr, time::Instant, process::Command, cfg, sync::{Arc, atomic::{AtomicBool, Ordering},}, env};
+use std::{io::Cursor, path::{Path, PathBuf}, str::FromStr, time::Instant, process::Command, cfg, env};
 use bytes::BytesMut;
 use clap::Args;
 use http_body_util::{BodyExt, Full};
@@ -27,12 +27,12 @@ struct ExternalCert {
 
 //Main Config from main.conf
 struct Config {
+    mode: bool,
     ip: String,
     port: u16,
     threasholds: Threasholds,
     threads: usize,
     cuda: bool,
-    auto_settings: bool
 }
 
 //Threasholds for each of the NSFW classes
@@ -47,7 +47,7 @@ struct Threasholds {
 async fn main() {
     println!("Initializing LustBlock...");
     let execpath = env::current_exe().unwrap();
-    let execdir = format!("{}/", execpath.parent().unwrap().to_str().unwrap());
+    let execdir = if !cfg!(debug_assertions) {format!("{}/", execpath.parent().unwrap().to_str().unwrap())} else {"./".to_string()} ;
     let configdir = format!("{}/LustBlock/", dirs_next::config_dir().unwrap().to_str().unwrap());
     std::fs::create_dir_all(&configdir).unwrap();
     tracing_subscriber::fmt()
@@ -57,11 +57,16 @@ async fn main() {
     //Read Config File
     let config_file = std::fs::read_to_string(Path::new(format!("{}config.json", execdir).as_str())).unwrap();
     let v: Value = serde_json::from_str(&config_file).unwrap();
+    let mode = if String::from_str(v["mode"].as_str().unwrap()).unwrap() == "client"{true} else {false};
+    if mode == true && !cfg!(target_os = "windows") {
+        panic!("Client mode is only supported on Windows! Please set 'mode' to server in config.json.");
+    }
     let config = Config {
+        mode: mode,
         //IP Address of the Proxy Server
-        ip: String::from_str(v["ip"].as_str().unwrap()).unwrap(),
+        ip: if mode {String::from_str("127.0.0.1").unwrap()} else {String::from_str(v["server"]["ip"].as_str().unwrap_or("127.0.0.1")).unwrap()},
         //Port of the Proxy Server
-        port: v["port"].as_u64().unwrap() as u16,
+        port: if mode {3003} else {v["server"]["port"].as_u64().unwrap_or(3003) as u16},
         //Prediction Threasholds
         threasholds: Threasholds {
             porn: v["detect_threasholds"]["porn"].as_f64().unwrap(),
@@ -72,8 +77,6 @@ async fn main() {
         threads: v["threads"].as_u64().unwrap() as usize,
         //Use the CUDA Execution Provider?
         cuda: v["cuda"].as_bool().unwrap(),
-        //Auto Apply Settings at Runtime (Windows only)
-        auto_settings: v["auto_settings"].as_bool().unwrap()
     };
     //Initialize Onnx Runtime
     let ort_init = ort::init()
@@ -98,7 +101,7 @@ async fn main() {
     } else {
         //Else, make and save them
         println!("Creating new Certficate...");
-        make_root_cert(&configdir)
+        make_root_cert(&configdir, &config)
     };
 
     let proxy = MitmProxy::new(
@@ -195,9 +198,10 @@ async fn main() {
 
     println!();
 
-    if config.auto_settings {
-        if cfg!(target_os = "windows") {
-            use windows_registry::*;
+    if config.mode {
+        #[cfg(target_family = "windows")]
+        {
+            use windows_registry::CURRENT_USER;
             let proxy_set = CURRENT_USER.create("SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Internet Settings").unwrap();
             proxy_set.set_string("ProxyServer", &format!("{}:{}", &config.ip, config.port));
             proxy_set.set_u32("ProxyEnable", 1);
@@ -216,18 +220,19 @@ async fn main() {
         Debug Test if you wish to not change your proxy settings
         curl -i https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcR8xF41_qUV3Kue3McuviMZmzj0FqCD7O2uEp0du0i7Hz4ZgpdJ --proxy 127.0.0.1:3003 --cacert ./pub.crt --ssl-revoke-best-effort
     */
-
+    #[cfg(target_os = "windows")]
     unsafe{ register_close_handler(); }
     server.await;
 
 }
 
+#[cfg(target_os = "windows")]
 #[link(name = "close", kind = "static")]
 extern "C" {
     fn register_close_handler();
 }
 
-fn make_root_cert(configdir: &String) -> rcgen::CertifiedKey {
+fn make_root_cert(configdir: &String, config: &Config) -> rcgen::CertifiedKey {
     let mut param = rcgen::CertificateParams::default();
 
     param.distinguished_name = rcgen::DistinguishedName::new();
@@ -245,12 +250,14 @@ fn make_root_cert(configdir: &String) -> rcgen::CertifiedKey {
     let cert = param.self_signed(&key_pair).unwrap();
     let _ = std::fs::write(Path::new(format!("{}pub.crt", configdir).as_str()), cert.pem());
     let _ = std::fs::write(Path::new(format!("{}priv.crt", configdir).as_str()), key_pair.serialize_pem());
-    if cfg!(target_os = "windows") { 
-        println!("Adding to Root Certificate Store");
-        println!("{:?}", Command::new("cmd")
-        .args(["/C", format!("certutil -user -addstore Root {}pub.crt", configdir).as_str()])
-        .output()
-        .expect("failed to execute process"));
+    if config.mode {
+        if cfg!(target_os = "windows") { 
+            println!("Adding to Root Certificate Store");
+            println!("{:?}", Command::new("cmd")
+            .args(["/C", format!("certutil -user -addstore Root {}pub.crt", configdir).as_str()])
+            .output()
+            .expect("failed to execute process"));
+        }
     }
     rcgen::CertifiedKey { cert, key_pair }
 }
