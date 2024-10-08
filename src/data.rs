@@ -8,18 +8,6 @@ impl<T> Data<T> {
     }
 }
 
-impl<T: ?Sized> Data<T> {
-    /// Returns reference to inner `T`.
-    pub fn get_ref(&self) -> &T {
-        self.0.as_ref()
-    }
-
-    /// Unwraps to the internal `Arc<T>`
-    pub fn into_inner(self) -> Arc<T> {
-        self.0
-    }
-}
-
 impl<T: ?Sized> Deref for Data<T> {
     type Target = Arc<T>;
 

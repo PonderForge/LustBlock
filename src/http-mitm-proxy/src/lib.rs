@@ -65,12 +65,12 @@ impl<C: Borrow<rcgen::CertifiedKey> + Send + Sync + 'static> MitmProxy<C> {
             loop {
                 let Ok((stream, client_addr)) = listener.accept().await else {
                     continue;
-                };
+                };  
 
                 let service = service.clone();
-
                 let proxy = proxy.clone();
                 tokio::spawn(async move {
+
                     if let Err(err) = server::conn::http1::Builder::new()
                         .preserve_header_case(true)
                         .title_case_headers(true)

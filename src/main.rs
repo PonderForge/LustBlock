@@ -45,6 +45,7 @@ struct Threasholds {
 
 #[tokio::main]
 async fn main() {
+
     println!("Initializing LustBlock...");
     let execpath = env::current_exe().unwrap();
     let execdir = if !cfg!(debug_assertions) {format!("{}/", execpath.parent().unwrap().to_str().unwrap())} else {"./".to_string()} ;
@@ -55,13 +56,13 @@ async fn main() {
         .init();
 
     //Read Config File
-    let config_file = std::fs::read_to_string(Path::new(format!("{}config.json", execdir).as_str())).unwrap();
+    let config_file: String = std::fs::read_to_string(Path::new(format!("{}config.json", execdir).as_str())).unwrap();
     let v: Value = serde_json::from_str(&config_file).unwrap();
-    let mode = if String::from_str(v["mode"].as_str().unwrap()).unwrap() == "client"{true} else {false};
+    let mode: bool = if String::from_str(v["mode"].as_str().unwrap()).unwrap() == "client"{true} else {false};
     if mode == true && !cfg!(target_os = "windows") {
         panic!("Client mode is only supported on Windows! Please set 'mode' to server in config.json.");
     }
-    let config = Config {
+    let config: Config = Config {
         mode: mode,
         //IP Address of the Proxy Server
         ip: if mode {String::from_str("127.0.0.1").unwrap()} else {String::from_str(v["server"]["ip"].as_str().unwrap_or("127.0.0.1")).unwrap()},
@@ -112,7 +113,6 @@ async fn main() {
         .with_inter_threads(config.threads).unwrap().commit_from_file(format!("{}model.onnx", execdir).as_str()).unwrap(),
         execdir
     );
-
     let client = DefaultClient::new(
         tokio_native_tls::native_tls::TlsConnector::builder()
             // You must set ALPN if you want to support HTTP/2
@@ -144,44 +144,48 @@ async fn main() {
                 }
                 if content_type == "image/jpeg" || content_type == "image/png" || content_type == "image/webp" {
                     println!("Image Detected");
-                    //Unlock the Model from the MITM Proxy threads
-                    let model = detector.lock().unwrap();
 
                     //Process the img
                     let original_img = image::load_from_memory(&body).unwrap();
-                    let replace_w = original_img.width().clone();
-                    let replace_h = original_img.height().clone();
-                    let img = original_img.resize_exact(299, 299, FilterType::CatmullRom);
-                    let mut input = Array::zeros((1, 299, 299, 3));
-                    for pixel in img.pixels() {
-                        let x = pixel.0 as _;
-                        let y = pixel.1 as _;
-                        let [r, g, b, _] = pixel.2.0;
-                        input[[0, y, x, 0]] = (r as f32) / 255.;
-                        input[[0, y, x, 1]] = (g as f32) / 255.;
-                        input[[0, y, x, 2]] = (b as f32) / 255.;
-                    }
+                    let replace_w: u32 = original_img.width().clone();
+                    let replace_h: u32 = original_img.height().clone();
+                    if replace_h > 60 || replace_w > 60 {
+                        let img = original_img.resize_exact(299, 299, FilterType::CatmullRom);
+                        let mut input = Array::zeros((1, 299, 299, 3));
+                        for pixel in img.pixels() {
+                            let x = pixel.0 as usize;
+                            let y = pixel.1 as usize;
+                            let [r, g, b, _] = pixel.2.0;
+                            input[[0, y, x, 0]] = (r as f32) / 255.;
+                            input[[0, y, x, 1]] = (g as f32) / 255.;
+                            input[[0, y, x, 2]] = (b as f32) / 255.;
+                        }
 
 
-                    //Perform Inference
-                    let now = Instant::now();
-                    let output_tensor: SessionOutputs = model.run(inputs!["input_1" => input.view()].unwrap()).unwrap();
-                    let outputs = output_tensor["dense_3"].try_extract_tensor::<f32>().unwrap();
-                    println!("  Elapsed: {:.2?}", now.elapsed());
-                    let mut metrix: Vec<_> = Vec::new();
-                    for output in outputs.rows() {
-                        metrix = output.to_vec();
-                    }
-                    println!("  Metrics: {:?}", metrix);
-                    //Process Metrics
-                    if metrix[1] > config.threasholds.hentai as f32 || metrix[3] > config.threasholds.porn as f32 || metrix[4] > config.threasholds.sexy as f32 {
-                        let replacement = image::open(Path::new(format!("{}distraction.jpg", execdir.lock().unwrap().as_str()).as_str())).unwrap().resize(replace_w, replace_h, FilterType::CatmullRom);
-                        let mut bytes: Vec<u8> = Vec::new();
-                        replacement.write_to(&mut Cursor::new(&mut bytes), if content_type == "image/png" {image::ImageFormat::Png} else if content_type == "image/webp" {image::ImageFormat::WebP} else {image::ImageFormat::Jpeg}).unwrap();
-                        body = BytesMut::from(bytes.as_slice());
-                        println!("  Image is NSFW: Blocked")
+                        //Perform Inference
+                        let now = Instant::now();
+                        //Unlock the Model from the MITM Proxy threads
+                        let model = detector.lock().unwrap();
+                        let output_tensor: SessionOutputs = model.run(inputs!["input_1" => input.view()].unwrap()).unwrap();
+                        let outputs = output_tensor["dense_3"].try_extract_tensor::<f32>().unwrap();
+                        println!("  Elapsed: {:.2?}", now.elapsed());
+                        let mut metrix: Vec<_> = Vec::new();
+                        for output in outputs.rows() {
+                            metrix = output.to_vec();
+                        }
+                        println!("  Metrics: {:?}", metrix);
+                        //Process Metrics
+                        if metrix[1] > config.threasholds.hentai as f32 || metrix[3] > config.threasholds.porn as f32 || metrix[4] > config.threasholds.sexy as f32 {
+                            let replacement = image::open(Path::new(format!("{}distraction.jpg", execdir.lock().unwrap().as_str()).as_str())).unwrap().resize(replace_w, replace_h, FilterType::CatmullRom);
+                            let mut bytes: Vec<u8> = Vec::new();
+                            replacement.write_to(&mut Cursor::new(&mut bytes), if content_type == "image/png" {image::ImageFormat::Png} else if content_type == "image/webp" {image::ImageFormat::WebP} else {image::ImageFormat::Jpeg}).unwrap();
+                            body = BytesMut::from(bytes.as_slice());
+                            println!("  Image is NSFW: Blocked")
+                        } else {
+                            println!("  Image is OK: Allowed")
+                        }
                     } else {
-                        println!("  Image is OK: Allowed")
+                        println!("  Image is Too Small: Allowed");
                     }
                 }
 
@@ -203,8 +207,8 @@ async fn main() {
         {
             use windows_registry::CURRENT_USER;
             let proxy_set = CURRENT_USER.create("SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Internet Settings").unwrap();
-            proxy_set.set_string("ProxyServer", &format!("{}:{}", &config.ip, config.port));
-            proxy_set.set_u32("ProxyEnable", 1);
+            let _ = proxy_set.set_string("ProxyServer", &format!("{}:{}", &config.ip, config.port));
+            let _ = proxy_set.set_u32("ProxyEnable", 1);
             println!("Proxy added to Computer Network Stack");
             println!("Enjoy a (sexual) temptation-less internet!");
         }
@@ -221,7 +225,9 @@ async fn main() {
         curl -i https://encrypted-tbn0.gstatic.com/images?q=tbn:ANd9GcR8xF41_qUV3Kue3McuviMZmzj0FqCD7O2uEp0du0i7Hz4ZgpdJ --proxy 127.0.0.1:3003 --cacert ./pub.crt --ssl-revoke-best-effort
     */
     #[cfg(target_os = "windows")]
-    unsafe{ register_close_handler(); }
+    if config.mode {
+        unsafe{ register_close_handler(); }
+    }
     server.await;
 
 }
