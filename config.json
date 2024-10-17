@@ -1,5 +1,5 @@
 {
-    "mode" : "client",
+    "mode" : "server",
     "server" : {
         "ip" : "127.0.0.1",
         "port": 3003
@@ -7,12 +7,13 @@
     "detect_threasholds": {
         "porn" : 0.6,
         "hentai" : 0.6,
-        "sexy" : 0.85,
-        "humans" : 0.3
+        "sexy" : 0.5,
+        "humans" : 0.2
     },
     "optimizations": {
         "threads": 12,
-        "cuda": false,
-        "avx": true
+        "cuda": true,
+        "avx": true,
+        "tensorrt": false
     }
 }

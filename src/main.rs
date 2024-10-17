@@ -7,10 +7,10 @@ use hyper::header::{HeaderValue, CONTENT_LENGTH, CONTENT_TYPE};
 use hyper::Response;
 use hyper::body::Bytes;
 use imageproc::{drawing::draw_filled_rect_mut, rect::Rect};
-use ort::{inputs, CPUExecutionProvider, CUDAExecutionProvider, GraphOptimizationLevel, Session, SessionOutputs};
+use ort::{inputs, CPUExecutionProvider, CUDAExecutionProvider, GraphOptimizationLevel, Session, SessionOutputs, TensorRTExecutionProvider};
 use tracing_subscriber::EnvFilter;
 use image::{ColorType, DynamicImage, GenericImageView, Rgba};
-use fast_image_resize::{CpuExtensions, IntoImageView, ResizeAlg, ResizeOptions, Resizer};
+use fast_image_resize::{CpuExtensions, ResizeAlg, ResizeOptions, Resizer};
 use ndarray::{s, Array, Axis, IxDyn};
 use serde_json::Value;
 use dirs_next;
@@ -46,6 +46,7 @@ struct Threasholds {
 
 struct Optimizations {
     cuda: bool,
+    tensorrt: bool,
     threads: usize,
     avx: bool
 }
@@ -90,11 +91,22 @@ async fn main() {
             cuda: v["optimizations"]["cuda"].as_bool().unwrap(),
             //Use AVX instuction for Resize?
             avx: v["optimizations"]["avx"].as_bool().unwrap(),
+            //Use the TensorRT Execution Provider?
+            tensorrt: v["optimizations"]["tensorrt"].as_bool().unwrap(),
         }
     };
+    let exec_providers = [
+        if config.optimizations.cuda {
+            CUDAExecutionProvider::default().build()
+        } else if config.optimizations.tensorrt {
+            TensorRTExecutionProvider::default().build()
+        } else {
+            CPUExecutionProvider::default().build()
+        }
+    ];
     //Initialize Onnx Runtime
     let ort_init = ort::init()
-		.with_execution_providers([if config.optimizations.cuda {CUDAExecutionProvider::default().build()} else {CPUExecutionProvider::default().build()}])
+		.with_execution_providers(exec_providers)
 		.commit();
     if ort_init.is_err() {
         panic!("ONNX was not correctly initalized! :(");
@@ -123,9 +135,9 @@ async fn main() {
         Some(root_cert),
         // This is the main Session for the NSFW detector
         Session::builder().unwrap().with_optimization_level(GraphOptimizationLevel::Level3).unwrap()
-        .with_inter_threads(config.optimizations.threads/2).unwrap().commit_from_file(format!("{}classifier.onnx", execdir).as_str()).unwrap(),
+        .with_intra_threads(config.optimizations.threads/2).unwrap().commit_from_file(format!("{}vits-classifier.onnx", execdir).as_str()).unwrap(),
         Session::builder().unwrap().with_optimization_level(GraphOptimizationLevel::Level3).unwrap()
-        .with_inter_threads(config.optimizations.threads/2).unwrap().commit_from_file(format!("{}detector.onnx", execdir).as_str()).unwrap(),
+        .with_intra_threads(config.optimizations.threads/4).unwrap().commit_from_file(format!("{}detector.onnx", execdir).as_str()).unwrap(),
         execdir
     );
     let client = DefaultClient::new(
@@ -170,24 +182,20 @@ async fn main() {
                     let replace_color: ColorType = input_img.color().clone();
                     if replace_h > 60 || replace_w > 60 {
 
-                        //Unlock Human Detector from the MITM Proxy threads
-                        let detector = detector.lock().unwrap();
                         //Create new ImageResizer
                         let mut resizer = Resizer::new();
-                        let options = ResizeOptions::new().resize_alg(ResizeAlg::Convolution(fast_image_resize::FilterType::Lanczos3));
+                        let options = ResizeOptions::new().resize_alg(ResizeAlg::Convolution(fast_image_resize::FilterType::Bilinear));
                         if config.optimizations.avx {
                             #[cfg(target_arch = "x86_64")]
                             unsafe {
                                 resizer.set_cpu_extensions(CpuExtensions::Avx2);
                             }
                         }
-                        let after_det_unlock = now.elapsed() - after_decoding;
-                        println!("  after_det_unlock: {:?}", after_det_unlock);
+                        let after_resize_create = now.elapsed() - after_decoding;
+                        println!("  after_resize_create: {:?}", after_resize_create);
                         //Resize Input Image for Human Detection
                         let mut img = DynamicImage::new(640, 640, input_img.color().clone());
-                        resizer.resize(&input_img, &mut img, &options);
-                        let after_resize_unlock = now.elapsed() - after_decoding - after_det_unlock;
-                        println!("  after_resize: {:?}", after_resize_unlock);
+                        let _ = resizer.resize(&input_img, &mut img, &options);
                         //Grab Width and Height Scaling to Apply Appropiate Covering
                         let resize_w_scale: f32 = replace_w as f32/img.width().clone() as f32;
                         let resize_h_scale: f32 = replace_h as f32/img.height().clone() as f32;
@@ -201,19 +209,17 @@ async fn main() {
                             input[[0, 1, y, x]] = (g as f32) / 255.;
                             input[[0, 2, y, x]] = (b as f32) / 255.;
                         }
+                        let after_resize_unlock = now.elapsed() - after_decoding - after_resize_create;
+                        println!("  after_resize: {:?}", after_resize_unlock);
                         //Run the Human Detector (YOLOv11) on the Image Vector
                         let output_tensor: SessionOutputs = detector.run(inputs!["images" => input.view()].unwrap()).unwrap();
                         let outputs = output_tensor["output0"].try_extract_tensor::<f32>().unwrap().view().t().to_owned();
-                        let after_det = now.elapsed() - after_resize_unlock - after_decoding - after_det_unlock;
+                        let after_det = now.elapsed() - after_resize_unlock - after_decoding - after_resize_create;
                         println!("  after_det: {:?}", after_det);
                         //Run post processing on Human Detector into Vector
                         let boxes = process_yolo_output(outputs, 640, 640);
-                        let after_det_process = now.elapsed() - after_det - after_resize_unlock - after_decoding - after_det_unlock;
+                        let after_det_process = now.elapsed() - after_det - after_resize_unlock - after_decoding - after_resize_create;
                         println!("  after_det_process: {:?}", after_det_process);
-                        //Unlock NSFW Classifier from the MITM Proxy threads
-                        let classifier = classifier.lock().unwrap();
-                        let after_class_unlock = now.elapsed() - after_det_process - after_det - after_resize_unlock - after_decoding - after_det_unlock;
-                        println!("  after_class_unlock: {:?}", after_class_unlock);
                         let mut replace_image = false;
                         for i in &boxes {
                             if i.4 > config.threasholds.humans as f32 {
@@ -227,8 +233,8 @@ async fn main() {
                                 }
                             }
                         }
-                        if replace_image {
-                            let after_class_process = now.elapsed() - after_class_unlock - after_det_process - after_det - after_resize_unlock - after_decoding - after_det_unlock;
+                        if replace_image  {
+                            let after_class_process = now.elapsed() - after_det_process - after_det - after_resize_unlock - after_decoding - after_resize_create;
                             println!("  after_class_process: {:?}", after_class_process);
                             //Replace Orginal Image with Scrubbed Image
                             println!("  Image is NSFW: Edited");
@@ -236,7 +242,7 @@ async fn main() {
                             input_img.write_to(&mut Cursor::new(&mut bytes), if content_type == "image/png" {image::ImageFormat::Png} else if content_type == "image/webp" {image::ImageFormat::WebP} else {image::ImageFormat::Jpeg}).unwrap();
                             body = BytesMut::from(bytes.as_slice());
                             parts.headers.insert(CONTENT_LENGTH, body.len().into());
-                            let after_image_replace = now.elapsed() - after_class_process - after_class_unlock - after_det_process - after_det - after_resize_unlock - after_decoding - after_det_unlock;
+                            let after_image_replace = now.elapsed() - after_class_process - after_det_process - after_det - after_resize_unlock - after_decoding - after_resize_create;
                             println!("  after_image_replace: {:?}", after_image_replace);
                         } else {
                             println!("  Image is OK: Allowed");
@@ -244,17 +250,26 @@ async fn main() {
                         //If the Human Detector does not find any humans, then Classifier runs on Whole Image
                         if boxes.is_empty() {
                             let metrix = classify_image(&classifier, &img, &mut resizer, &options);
+                            let after_class_process = now.elapsed() - after_det_process - after_det - after_resize_unlock - after_decoding - after_resize_create;
+                            println!("  after_class_process: {:?}", after_class_process);
                             println!("  Overall Metrics: {:?}", metrix);
                             if metrix[1] > config.threasholds.hentai as f32 || metrix[3] > config.threasholds.porn as f32 || metrix[4] > config.threasholds.sexy as f32 {
                                 //Replace Whole Image with Distraction
                                 let mut replacement = DynamicImage::new(replace_w, replace_h, replace_color);
-                                resizer.resize(&image::open(Path::new(format!("{}distraction.jpg", execdir).as_str())).unwrap(), &mut replacement, &options);
+                                let _ = resizer.resize(&image::open(Path::new(format!("{}distraction.jpg", execdir).as_str())).unwrap(), &mut replacement, &options);
                                 let mut bytes: Vec<u8> = Vec::new();
                                 replacement.write_to(&mut Cursor::new(&mut bytes), if content_type == "image/png" {image::ImageFormat::Png} else if content_type == "image/webp" {image::ImageFormat::WebP} else {image::ImageFormat::Jpeg}).unwrap();
                                 body = BytesMut::from(bytes.as_slice());
-                                println!("  Image is NSFW: Blocked")
+                                println!("  Image is NSFW: Blocked");
+                                let after_image_replace = now.elapsed() - after_class_process - after_det_process - after_det - after_resize_unlock - after_decoding - after_resize_create;
+                                println!("  after_image_replace: {:?}", after_image_replace);
                             } else {
                                 println!("  Image is OK: Allowed")
+                            }
+                        } else {
+                            if !replace_image  {
+                                let after_class_process = now.elapsed() - after_det_process - after_det - after_resize_unlock - after_decoding - after_resize_create;
+                                println!("  after_class_process: {:?}", after_class_process);
                             }
                         }
                         println!("  Time: {:?}", now.elapsed());
@@ -341,22 +356,22 @@ fn make_root_cert(configdir: &String, config: &Config) -> rcgen::CertifiedKey {
     }
     rcgen::CertifiedKey { cert, key_pair }
 }
-fn classify_image (model: &std::sync::MutexGuard<'_, Session>, image: &DynamicImage, resizer: &mut Resizer, options: &ResizeOptions) -> Vec<f32> {
+fn classify_image (model: &Session, image: &DynamicImage, resizer: &mut Resizer, options: &ResizeOptions) -> Vec<f32> {
     //Reformat Image to Classifer Model Input
-    let mut img = DynamicImage::new(299, 299, image.color().clone());
-    resizer.resize(image, &mut img, options);
-    let mut input = Array::zeros((1, 299, 299, 3));
+    let mut img = DynamicImage::new(224, 224, image.color().clone());
+    let _ = resizer.resize(image, &mut img, options);
+    let mut input = Array::zeros((1, 3, 224, 224));
     for pixel in img.pixels() {
         let x = pixel.0 as usize;
         let y = pixel.1 as usize;
         let [r, g, b, _] = pixel.2.0;
-        input[[0, y, x, 0]] = (r as f32) / 255.;
-        input[[0, y, x, 1]] = (g as f32) / 255.;
-        input[[0, y, x, 2]] = (b as f32) / 255.;
+        input[[0, 0, y, x]] = (r as f32) / 255.;
+        input[[0, 1, y, x]] = (g as f32) / 255.;
+        input[[0, 2, y, x]] = (b as f32) / 255.;
     }
     //Perform Inference
-    let output_tensor: SessionOutputs = model.run(inputs!["input_1" => input.view()].unwrap()).unwrap();
-    let outputs = output_tensor["dense_3"].try_extract_tensor::<f32>().unwrap();
+    let output_tensor: SessionOutputs = model.run(inputs!["pixel_values" => input.view()].unwrap()).unwrap();
+    let outputs = output_tensor["logits"].try_extract_tensor::<f32>().unwrap();
     let mut metrix: Vec<f32> = Vec::new();
     for output in outputs.rows() {
         metrix = output.to_vec();

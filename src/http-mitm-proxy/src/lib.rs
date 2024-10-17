@@ -8,7 +8,7 @@ use hyper::{
     Method, Request, Response, StatusCode,
 };
 use hyper_util::rt::{TokioExecutor, TokioIo};
-use std::{borrow::Borrow, future::Future, net::SocketAddr, sync::{Arc, Mutex}};
+use std::{borrow::Borrow, future::Future, net::SocketAddr, sync::Arc};
 use tls::server_config;
 use tokio::net::{TcpListener, TcpStream, ToSocketAddrs};
 use ort::Session;
@@ -29,15 +29,15 @@ pub struct MitmProxy<C> {
     ///
     /// If None, proxy will just tunnel HTTPS traffic and will not observe HTTPS traffic.
     pub root_cert: Option<C>,
-    pub classifier: Data<Mutex<Session>>,
-    pub detector: Data<Mutex<Session>>,
+    pub classifier: Data<Session>,
+    pub detector: Data<Session>,
     pub execdir: &'static str
 }
 
 impl<C> MitmProxy<C> {
     /// Create a new MitmProxy
     pub fn new(root_cert: Option<C>, classifier: Session, detector: Session, execdir: &'static str) -> Self {
-        Self { root_cert, classifier: Data::new(Mutex::new(classifier)), detector: Data::new(Mutex::new(detector)), execdir: execdir}
+        Self { root_cert, classifier: Data::new(classifier), detector: Data::new(detector), execdir: execdir}
     }
 }
 
@@ -55,13 +55,12 @@ impl<C: Borrow<rcgen::CertifiedKey> + Send + Sync + 'static> MitmProxy<C> {
         B: Body<Data = Bytes, Error = E> + Send + Sync + 'static,
         E: std::error::Error + Send + Sync + 'static,
         E2: std::error::Error + Send + Sync + 'static,
-        S: Fn(SocketAddr, Request<Incoming>, Data<Mutex<Session>>, Data<Mutex<Session>>, &'static str) -> F + Send + Sync + Clone + 'static,
+        S: Fn(SocketAddr, Request<Incoming>, Data<Session>, Data<Session>, &'static str) -> F + Send + Sync + Clone + 'static,
         F: Future<Output = Result<Response<B>, E2>> + Send,
     {
         let listener = TcpListener::bind(addr).await?;
 
         let proxy = Arc::new(self);
-
         Ok(async move {
             loop {
                 let Ok((stream, client_addr)) = listener.accept().await else {
@@ -98,7 +97,7 @@ impl<C: Borrow<rcgen::CertifiedKey> + Send + Sync + 'static> MitmProxy<C> {
         service: S,
     ) -> Result<Response<BoxBody<Bytes, E>>, E2>
     where
-        S: Fn(SocketAddr, Request<Incoming>, Data<Mutex<Session>>, Data<Mutex<Session>>, &'static str) -> F + Send + Clone + 'static,
+        S: Fn(SocketAddr, Request<Incoming>, Data<Session>, Data<Session>, &'static str) -> F + Send + Clone + 'static,
         F: Future<Output = Result<Response<B>, E2>> + Send,
         B: Body<Data = Bytes, Error = E> + Send + Sync + 'static,
         E: std::error::Error + Send + Sync + 'static,
