@@ -6,14 +6,15 @@ use http_mitm_proxy::{DefaultClient, MitmProxy};
 use hyper::header::{HeaderValue, CONTENT_LENGTH, CONTENT_TYPE};
 use hyper::Response;
 use hyper::body::Bytes;
-use imageproc::{drawing::draw_filled_rect_mut, rect::Rect};
 use ort::{inputs, CPUExecutionProvider, CUDAExecutionProvider, GraphOptimizationLevel, Session, SessionOutputs, TensorRTExecutionProvider};
 use tracing_subscriber::EnvFilter;
-use image::{ColorType, DynamicImage, GenericImageView, Rgba};
-use fast_image_resize::{CpuExtensions, ResizeAlg, ResizeOptions, Resizer};
 use ndarray::{s, Array, Axis, IxDyn};
 use serde_json::Value;
 use dirs_next;
+use opencv::imgcodecs::IMREAD_COLOR;
+use opencv::core::*;
+use opencv::imgproc::*;
+use opencv::dnn::*;
 
 mod data;
 
@@ -48,7 +49,6 @@ struct Optimizations {
     cuda: bool,
     tensorrt: bool,
     threads: usize,
-    avx: bool
 }
 
 
@@ -89,8 +89,6 @@ async fn main() {
             threads: v["optimizations"]["threads"].as_u64().unwrap() as usize,
             //Use the CUDA Execution Provider?
             cuda: v["optimizations"]["cuda"].as_bool().unwrap(),
-            //Use AVX instuction for Resize?
-            avx: v["optimizations"]["avx"].as_bool().unwrap(),
             //Use the TensorRT Execution Provider?
             tensorrt: v["optimizations"]["tensorrt"].as_bool().unwrap(),
         }
@@ -174,101 +172,80 @@ async fn main() {
                     let now = Instant::now();
 
                     //Process the img
-                    let mut input_img = image::load_from_memory(&body).unwrap();
+                    let mut input_img = opencv::imgcodecs::imdecode(
+                        &opencv::core::Mat::from_slice(&body.to_vec()).unwrap(),
+                        IMREAD_COLOR,
+                    ).unwrap();
                     let after_decoding = now.elapsed();
                     println!("  after_decoding: {:?}", after_decoding);
-                    let replace_w: u32 = input_img.width().clone();
-                    let replace_h: u32 = input_img.height().clone();
-                    let replace_color: ColorType = input_img.color().clone();
-                    if replace_h > 60 || replace_w > 60 {
-
-                        //Create new ImageResizer
-                        let mut resizer = Resizer::new();
-                        let options = ResizeOptions::new().resize_alg(ResizeAlg::Convolution(fast_image_resize::FilterType::Bilinear));
-                        if config.optimizations.avx {
-                            #[cfg(target_arch = "x86_64")]
-                            unsafe {
-                                resizer.set_cpu_extensions(CpuExtensions::Avx2);
-                            }
-                        }
-                        let after_resize_create = now.elapsed() - after_decoding;
-                        println!("  after_resize_create: {:?}", after_resize_create);
+                    let input_img_w: i32 = input_img.cols();
+                    let input_img_h: i32 = input_img.rows();
+                    if input_img_h > 60 || input_img_w > 60 {
                         //Resize Input Image for Human Detection
-                        let mut img = DynamicImage::new(640, 640, input_img.color().clone());
-                        let _ = resizer.resize(&input_img, &mut img, &options);
-                        //Grab Width and Height Scaling to Apply Appropiate Covering
-                        let resize_w_scale: f32 = replace_w as f32/img.width().clone() as f32;
-                        let resize_h_scale: f32 = replace_h as f32/img.height().clone() as f32;
-                        //Convert Image to a Vector
-                        let mut input = Array::zeros((1, 3, 640, 640));
-                        for pixel in img.pixels() {
-                            let x = pixel.0 as usize;
-                            let y = pixel.1 as usize;
-                            let [r, g, b, _] = pixel.2.0;
-                            input[[0, 0, y, x]] = (r as f32) / 255.;
-                            input[[0, 1, y, x]] = (g as f32) / 255.;
-                            input[[0, 2, y, x]] = (b as f32) / 255.;
-                        }
-                        let after_resize_unlock = now.elapsed() - after_decoding - after_resize_create;
+                        let resize_w_scale: f32 = input_img_w as f32/640f32;
+                        let resize_h_scale: f32 = input_img_h as f32/640f32;
+                        //Convert Image to a Tensor
+                        let resized_img: Mat = blob_from_image(&input_img, 1f64/255f64, Size::new(640, 640), Scalar::new(0.0,0.0,0.0,0.0), true, false, CV_32F).unwrap();
+                        let input_tensor = ort::Tensor::from_array(([1usize,3,640,640], resized_img.data_typed::<f32>().unwrap())).unwrap();
+                        let after_resize_unlock = now.elapsed() - after_decoding;
                         println!("  after_resize: {:?}", after_resize_unlock);
-                        //Run the Human Detector (YOLOv11) on the Image Vector
-                        let output_tensor: SessionOutputs = detector.run(inputs!["images" => input.view()].unwrap()).unwrap();
+                        //Run the Human Detector (YOLOv11) on the Image Tensor
+                        let output_tensor: SessionOutputs = detector.run(inputs!["images" => input_tensor].unwrap()).unwrap();
                         let outputs = output_tensor["output0"].try_extract_tensor::<f32>().unwrap().view().t().to_owned();
-                        let after_det = now.elapsed() - after_resize_unlock - after_decoding - after_resize_create;
+                        let after_det = now.elapsed() - after_resize_unlock - after_decoding;
                         println!("  after_det: {:?}", after_det);
                         //Run post processing on Human Detector into Vector
                         let boxes = process_yolo_output(outputs, 640, 640);
-                        let after_det_process = now.elapsed() - after_det - after_resize_unlock - after_decoding - after_resize_create;
+                        let after_det_process = now.elapsed() - after_det - after_resize_unlock - after_decoding;
                         println!("  after_det_process: {:?}", after_det_process);
                         let mut replace_image = false;
                         for i in &boxes {
                             if i.4 > config.threasholds.humans as f32 {
                                 //Run NSFW Classification on All Humans Detected
-                                let metrix = classify_image(&classifier, &img.crop(i.0 as u32, i.1 as u32, (i.2-i.0).abs() as u32, (i.3-i.1).abs() as u32), &mut resizer, &options);
+                                let metrix = classify_image(&classifier, &input_img, Rect::from_points(Point::new((i.0*resize_w_scale) as i32, (i.1*resize_h_scale) as i32), Point::new((i.2*resize_w_scale) as i32, (i.3*resize_h_scale) as i32)));
                                 println!("  Human Metrics: {:?}", metrix);
                                 if metrix[1] > config.threasholds.hentai as f32 || metrix[3] > config.threasholds.porn as f32 || metrix[4] > config.threasholds.sexy as f32 {
                                     //Cover Human if NSFW
-                                    draw_filled_rect_mut(&mut input_img, Rect::at((i.0*resize_w_scale) as i32, (i.1*resize_h_scale) as i32).of_size(((i.2-i.0).abs() * resize_w_scale) as u32, ((i.3-i.1).abs() * resize_h_scale) as u32), Rgba([(255f32*metrix[1]) as u8, (255f32*metrix[3]) as u8, (255f32*metrix[4]) as u8, 255u8]));
+                                    let _ = rectangle(&mut input_img, Rect::from_points(Point::new((i.0*resize_w_scale) as i32, (i.1*resize_h_scale) as i32), Point::new((i.2*resize_w_scale) as i32, (i.3*resize_h_scale) as i32)), Scalar::new(0.0,0.0,0.0,255.0), -1, 8, 0);
                                     replace_image = true;
                                 }
                             }
                         }
                         if replace_image  {
-                            let after_class_process = now.elapsed() - after_det_process - after_det - after_resize_unlock - after_decoding - after_resize_create;
+                            let after_class_process = now.elapsed() - after_det_process - after_det - after_resize_unlock - after_decoding;
                             println!("  after_class_process: {:?}", after_class_process);
                             //Replace Orginal Image with Scrubbed Image
                             println!("  Image is NSFW: Edited");
-                            let mut bytes: Vec<u8> = Vec::new();
-                            input_img.write_to(&mut Cursor::new(&mut bytes), if content_type == "image/png" {image::ImageFormat::Png} else if content_type == "image/webp" {image::ImageFormat::WebP} else {image::ImageFormat::Jpeg}).unwrap();
+                            let mut bytes = Vector::new();
+                            let _ = opencv::imgcodecs::imencode(if content_type == "image/png" {".png"} else if content_type == "image/webp" {".webp"} else {".jpg"}, &input_img, &mut bytes, &opencv::core::Vector::new());
                             body = BytesMut::from(bytes.as_slice());
                             parts.headers.insert(CONTENT_LENGTH, body.len().into());
-                            let after_image_replace = now.elapsed() - after_class_process - after_det_process - after_det - after_resize_unlock - after_decoding - after_resize_create;
+                            let after_image_replace = now.elapsed() - after_class_process - after_det_process - after_det - after_resize_unlock - after_decoding;
                             println!("  after_image_replace: {:?}", after_image_replace);
                         } else {
                             println!("  Image is OK: Allowed");
                         }
                         //If the Human Detector does not find any humans, then Classifier runs on Whole Image
                         if boxes.is_empty() {
-                            let metrix = classify_image(&classifier, &img, &mut resizer, &options);
-                            let after_class_process = now.elapsed() - after_det_process - after_det - after_resize_unlock - after_decoding - after_resize_create;
+                            let metrix = classify_image(&classifier, &input_img, Rect::from_points(Point::new(0, 0), Point::new(input_img.cols(), input_img.rows())));
+                            let after_class_process = now.elapsed() - after_det_process - after_det - after_resize_unlock - after_decoding;
                             println!("  after_class_process: {:?}", after_class_process);
                             println!("  Overall Metrics: {:?}", metrix);
                             if metrix[1] > config.threasholds.hentai as f32 || metrix[3] > config.threasholds.porn as f32 || metrix[4] > config.threasholds.sexy as f32 {
                                 //Replace Whole Image with Distraction
-                                let mut replacement = DynamicImage::new(replace_w, replace_h, replace_color);
-                                let _ = resizer.resize(&image::open(Path::new(format!("{}distraction.jpg", execdir).as_str())).unwrap(), &mut replacement, &options);
-                                let mut bytes: Vec<u8> = Vec::new();
-                                replacement.write_to(&mut Cursor::new(&mut bytes), if content_type == "image/png" {image::ImageFormat::Png} else if content_type == "image/webp" {image::ImageFormat::WebP} else {image::ImageFormat::Jpeg}).unwrap();
+                                let mut bytes = Vector::new();
+                                let replacement = opencv::imgcodecs::imread(&format!("{:?}distraction.jpg", execdir), 0).unwrap();
+                                let _ = opencv::imgcodecs::imencode(if content_type == "image/png" {".png"} else if content_type == "image/webp" {".webp"} else {".jpg"}, &replacement, &mut bytes, &opencv::core::Vector::new());
                                 body = BytesMut::from(bytes.as_slice());
                                 println!("  Image is NSFW: Blocked");
-                                let after_image_replace = now.elapsed() - after_class_process - after_det_process - after_det - after_resize_unlock - after_decoding - after_resize_create;
+                                let after_image_replace = now.elapsed() - after_class_process - after_det_process - after_det - after_resize_unlock - after_decoding;
                                 println!("  after_image_replace: {:?}", after_image_replace);
                             } else {
                                 println!("  Image is OK: Allowed")
                             }
                         } else {
                             if !replace_image  {
-                                let after_class_process = now.elapsed() - after_det_process - after_det - after_resize_unlock - after_decoding - after_resize_create;
+                                let after_class_process = now.elapsed() - after_det_process - after_det - after_resize_unlock - after_decoding;
                                 println!("  after_class_process: {:?}", after_class_process);
                             }
                         }
@@ -356,21 +333,12 @@ fn make_root_cert(configdir: &String, config: &Config) -> rcgen::CertifiedKey {
     }
     rcgen::CertifiedKey { cert, key_pair }
 }
-fn classify_image (model: &Session, image: &DynamicImage, resizer: &mut Resizer, options: &ResizeOptions) -> Vec<f32> {
+fn classify_image (model: &Session, image: &Mat, crop: Rect) -> Vec<f32> {
     //Reformat Image to Classifer Model Input
-    let mut img = DynamicImage::new(224, 224, image.color().clone());
-    let _ = resizer.resize(image, &mut img, options);
-    let mut input = Array::zeros((1, 3, 224, 224));
-    for pixel in img.pixels() {
-        let x = pixel.0 as usize;
-        let y = pixel.1 as usize;
-        let [r, g, b, _] = pixel.2.0;
-        input[[0, 0, y, x]] = (r as f32) / 255.;
-        input[[0, 1, y, x]] = (g as f32) / 255.;
-        input[[0, 2, y, x]] = (b as f32) / 255.;
-    }
+    let resized_img: Mat = blob_from_image(&image.roi(crop).unwrap(), 1f64/255f64, Size::new(224, 224), Scalar::new(0.0,0.0,0.0,0.0), true, false, CV_32F).unwrap();
+    let input_tensor = ort::Tensor::from_array(([1usize,3,224,224], resized_img.data_typed::<f32>().unwrap())).unwrap();
     //Perform Inference
-    let output_tensor: SessionOutputs = model.run(inputs!["pixel_values" => input.view()].unwrap()).unwrap();
+    let output_tensor: SessionOutputs = model.run(inputs!["pixel_values" => input_tensor].unwrap()).unwrap();
     let outputs = output_tensor["logits"].try_extract_tensor::<f32>().unwrap();
     let mut metrix: Vec<f32> = Vec::new();
     for output in outputs.rows() {

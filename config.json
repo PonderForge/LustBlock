@@ -13,7 +13,6 @@
     "optimizations": {
         "threads": 12,
         "cuda": true,
-        "avx": true,
         "tensorrt": false
     }
 }

@@ -11,7 +11,6 @@ tokio = "1.34.0"
 tokio-native-tls = "0.3.1"
 rcgen = { version = "0.13.1", features = ["x509-parser"] }
 ort = { version = "2.0.0-rc.2", features = ["cuda", "load-dynamic", "tensorrt"] }
-image = "0.25"
 ndarray = "0.16"
 hyper = { version = "=1.0.1", features = ["http1", "http2", "server", "client"] }
 http-body-util = "0.1.0"
@@ -21,9 +20,7 @@ serde_json = "1.0.128"
 dirs-next = "2.0.0"
 windows-registry = "0.2.0"
 signal-hook = "0.3.17"
-imageproc = "0.25.0"
-fast_image_resize = { version = "5.0.0", features = ["image"] }
-tokio-executor = "0.1.10"
+opencv = {version = "0.93.3", default-features = false , features = ["clang-runtime", "imgcodecs", "imgproc", "dnn"]}
 
 [build-dependencies]
 winresource = "0.1.17"
