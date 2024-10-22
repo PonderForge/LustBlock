@@ -10,8 +10,9 @@ use hyper::{
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use std::{borrow::Borrow, future::Future, net::SocketAddr, sync::Arc};
 use tls::server_config;
-use tokio::net::{TcpListener, TcpStream, ToSocketAddrs};
+use tokio::net::{TcpListener, ToSocketAddrs};
 use ort::Session;
+use yaml_rust2::yaml::Hash;
 
 pub use futures;
 pub use hyper;
@@ -31,13 +32,14 @@ pub struct MitmProxy<C> {
     pub root_cert: Option<C>,
     pub classifier: Data<Session>,
     pub detector: Data<Session>,
+    pub site_reactions: Data<Hash>, 
     pub execdir: &'static str
 }
 
 impl<C> MitmProxy<C> {
     /// Create a new MitmProxy
-    pub fn new(root_cert: Option<C>, classifier: Session, detector: Session, execdir: &'static str) -> Self {
-        Self { root_cert, classifier: Data::new(classifier), detector: Data::new(detector), execdir: execdir}
+    pub fn new(root_cert: Option<C>, classifier: Session, detector: Session, site_reactions: Hash, execdir: &'static str) -> Self {
+        Self { root_cert, classifier: Data::new(classifier), detector: Data::new(detector), site_reactions: Data::new(site_reactions), execdir: execdir}
     }
 }
 
@@ -55,7 +57,7 @@ impl<C: Borrow<rcgen::CertifiedKey> + Send + Sync + 'static> MitmProxy<C> {
         B: Body<Data = Bytes, Error = E> + Send + Sync + 'static,
         E: std::error::Error + Send + Sync + 'static,
         E2: std::error::Error + Send + Sync + 'static,
-        S: Fn(SocketAddr, Request<Incoming>, Data<Session>, Data<Session>, &'static str) -> F + Send + Sync + Clone + 'static,
+        S: Fn(SocketAddr, Request<Incoming>, Data<Session>, Data<Session>, Data<Hash>, &'static str) -> F + Send + Sync + Clone + 'static,
         F: Future<Output = Result<Response<B>, E2>> + Send,
     {
         let listener = TcpListener::bind(addr).await?;
@@ -97,7 +99,7 @@ impl<C: Borrow<rcgen::CertifiedKey> + Send + Sync + 'static> MitmProxy<C> {
         service: S,
     ) -> Result<Response<BoxBody<Bytes, E>>, E2>
     where
-        S: Fn(SocketAddr, Request<Incoming>, Data<Session>, Data<Session>, &'static str) -> F + Send + Clone + 'static,
+        S: Fn(SocketAddr, Request<Incoming>, Data<Session>, Data<Session>, Data<Hash>, &'static str) -> F + Send + Clone + 'static,
         F: Future<Output = Result<Response<B>, E2>> + Send,
         B: Body<Data = Bytes, Error = E> + Send + Sync + 'static,
         E: std::error::Error + Send + Sync + 'static,
@@ -146,14 +148,16 @@ impl<C: Borrow<rcgen::CertifiedKey> + Send + Sync + 'static> MitmProxy<C> {
                     let classifier = proxy.classifier.clone();
                     let detector = proxy.detector.clone();
                     let execdir = proxy.execdir;
+                    let site_reactions = proxy.site_reactions.clone();
                     let f = move |mut req: Request<_>| {
                         let connect_authority = connect_authority.clone();
                         let service = service.clone();
                         let classi2 = classifier.clone();
                         let detect2 = detector.clone();
+                        let site_reactions2 = site_reactions.clone();
                         async move {
                             inject_authority(&mut req, connect_authority.clone());
-                            service(client_addr, req, classi2, detect2, execdir).await
+                            service(client_addr, req, classi2, detect2, site_reactions2, execdir).await
                         }
                     };
                     let res = if client.get_ref().1.alpn_protocol() == Some(b"h2") {
@@ -172,14 +176,6 @@ impl<C: Borrow<rcgen::CertifiedKey> + Send + Sync + 'static> MitmProxy<C> {
                     if let Err(err) = res {
                         tracing::error!("Error in proxy: {}", err);
                     }
-                } else {
-                    let Ok(mut server) = TcpStream::connect(connect_authority.as_str()).await
-                    else {
-                        tracing::error!("Failed to connect to {}", connect_authority);
-                        return;
-                    };
-                    let _ =
-                        tokio::io::copy_bidirectional(&mut TokioIo::new(client), &mut server).await;
                 }
             });
 
@@ -190,7 +186,7 @@ impl<C: Borrow<rcgen::CertifiedKey> + Send + Sync + 'static> MitmProxy<C> {
             ))
         } else {
             // http
-            service(client_addr, req, proxy.classifier.clone(), proxy.detector.clone(), proxy.execdir)
+            service(client_addr, req, proxy.classifier.clone(), proxy.detector.clone(), proxy.site_reactions.clone(), proxy.execdir)
                 .await
                 .map(|res| res.map(|b| b.boxed()))
         }

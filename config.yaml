@@ -1,0 +1,38 @@
+# LustBlock Config File
+# Mode is either Server or Client, Server only starts a proxy server, while Client only works on windows to auto enable/disable the proxy on machine
+mode: "client"
+# If Mode is set to Server, you can change the ip and port like below
+server_settings: 
+  ip: "0.0.0.0"
+  port: 3003
+# AIs predict how an image would be classified by a human, with a probability. 
+# We must use discresion on what the minimum probability for each class is, a minimum probabilty means threashold.
+# We have 4 values, human is the probability that a human is in a part of a image.
+# The other 3 are probability that a image or predicted human is porn, hentai or sexual.
+# Too high of threasholds may cause false negatives allowing sexual images or humans to slip though LustBlock.
+# Too low of threasholds may cause false positives which may accidentally identify neutral people or images as sexual
+detect_threasholds:
+  porn: 0.6
+  hentai: 0.6
+  sexual: 0.5
+  humans: 0.2
+# In order to speed up LustBlock recognition, we have options to utilize any special hardware you may have.
+# If you have a multi cored CPU, set threads to the number of hardware threads it's supports.
+# If you have a NVIDIA GPU, install CUDA 12.5 and CUDNN 8.1, to use CUDA, and the CUDA reqiurements plus TensorRT 10, to use TensorRT. Then set one of the below options to True
+optimizations:
+  threads: 12
+  cuda: true
+  tensorrt: false
+# Some sites don't need detection, they just need to be blocked or are completely safe. 
+# As such we have a option to change detection levels, per your discretion, and per domain
+# There is a default setting for all sites you don't list and then site by site settings
+# The settings are denoted by letters. 
+#   'h' means run human-based detection and removal 
+#   'c' means run detection and removal on the whole image
+#   'w' means don't run any detection, this site is defintely safe, aka whitelist
+#   'b' means don't run any detection, this site is should burn I don't ever want to see it again, aka blacklist
+# 'h' and 'c' can be ran together, while 'w' and 'b' override any other settings, using 'w' and 'b' together might end the world ;)
+default_reaction: "hc"
+site_reaction_settings:
+  example.com: "w"
+  google.com: "b"

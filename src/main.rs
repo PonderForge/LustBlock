@@ -1,20 +1,21 @@
-use std::{io::Cursor, path::{Path, PathBuf}, str::FromStr, time::Instant, process::Command, cfg, env};
+use std::{cfg, env, io::Read, path::{Path, PathBuf}, process::Command, str::FromStr, time::Instant};
 use bytes::BytesMut;
 use clap::Args;
 use http_body_util::{BodyExt, Full};
 use http_mitm_proxy::{DefaultClient, MitmProxy};
-use hyper::header::{HeaderValue, CONTENT_LENGTH, CONTENT_TYPE};
+use hyper::header::{HeaderValue, CONTENT_ENCODING, CONTENT_TYPE, CONTENT_LENGTH};
 use hyper::Response;
 use hyper::body::Bytes;
 use ort::{inputs, CPUExecutionProvider, CUDAExecutionProvider, GraphOptimizationLevel, Session, SessionOutputs, TensorRTExecutionProvider};
 use tracing_subscriber::EnvFilter;
 use ndarray::{s, Array, Axis, IxDyn};
-use serde_json::Value;
 use dirs_next;
 use opencv::imgcodecs::IMREAD_COLOR;
 use opencv::core::*;
 use opencv::imgproc::*;
 use opencv::dnn::*;
+use yaml_rust2::{yaml::{self, Hash}, YamlLoader};
+use flate2::read::GzDecoder;
 
 mod data;
 
@@ -34,7 +35,9 @@ struct Config {
     ip: String,
     port: u16,
     threasholds: Threasholds,
-    optimizations: Optimizations
+    optimizations: Optimizations,
+    default_reaction: u8,
+    site_reaction_settings: Hash
 }
 
 //Threasholds for each of the NSFW classes
@@ -65,33 +68,35 @@ async fn main() {
         .init();
 
     //Read Config File
-    let config_file: String = std::fs::read_to_string(Path::new(format!("{}config.json", execdir).as_str())).unwrap();
-    let v: Value = serde_json::from_str(&config_file).unwrap();
-    let mode: bool = if String::from_str(v["mode"].as_str().unwrap()).unwrap() == "client"{true} else {false};
+    let config_file: String = std::fs::read_to_string(Path::new(format!("{}config.yaml", execdir).as_str())).unwrap();
+    let config_deser = &YamlLoader::load_from_str(&config_file).unwrap()[0];
+    let mode: bool = if String::from_str(config_deser["mode"].as_str().unwrap()).unwrap() == "client"{true} else {false};
     if mode == true && !cfg!(target_os = "windows") {
         panic!("Client mode is only supported on Windows! Please set 'mode' to server in config.json.");
     }
     let config: Config = Config {
         mode: mode,
         //IP Address of the Proxy Server
-        ip: if mode {String::from_str("127.0.0.1").unwrap()} else {String::from_str(v["server"]["ip"].as_str().unwrap_or("127.0.0.1")).unwrap()},
+        ip: if mode {String::from_str("127.0.0.1").unwrap()} else {String::from_str(config_deser["server_settings"]["ip"].as_str().unwrap_or("127.0.0.1")).unwrap()},
         //Port of the Proxy Server
-        port: if mode {3003} else {v["server"]["port"].as_u64().unwrap_or(3003) as u16},
+        port: if mode {3003} else {config_deser["server_settings"]["port"].as_i64().unwrap_or(3003) as u16},
         //Prediction Threasholds
         threasholds: Threasholds {
-            porn: v["detect_threasholds"]["porn"].as_f64().unwrap(),
-            sexy: v["detect_threasholds"]["sexy"].as_f64().unwrap(),
-            hentai: v["detect_threasholds"]["hentai"].as_f64().unwrap(),
-            humans: v["detect_threasholds"]["humans"].as_f64().unwrap(),
+            porn: config_deser["detect_threasholds"]["porn"].as_f64().unwrap(),
+            sexy: config_deser["detect_threasholds"]["sexual"].as_f64().unwrap(),
+            hentai: config_deser["detect_threasholds"]["hentai"].as_f64().unwrap(),
+            humans: config_deser["detect_threasholds"]["humans"].as_f64().unwrap(),
         },
         optimizations: Optimizations {
             //Number of Threads to use 
-            threads: v["optimizations"]["threads"].as_u64().unwrap() as usize,
+            threads: config_deser["optimizations"]["threads"].as_i64().unwrap() as usize,
             //Use the CUDA Execution Provider?
-            cuda: v["optimizations"]["cuda"].as_bool().unwrap(),
+            cuda: config_deser["optimizations"]["cuda"].as_bool().unwrap(),
             //Use the TensorRT Execution Provider?
-            tensorrt: v["optimizations"]["tensorrt"].as_bool().unwrap(),
-        }
+            tensorrt: config_deser["optimizations"]["tensorrt"].as_bool().unwrap(),
+        },
+        default_reaction: encode_reaction(config_deser["default_reaction"].as_str().unwrap()),
+        site_reaction_settings: config_deser["site_reaction_settings"].as_hash().unwrap().clone()
     };
     let exec_providers = [
         if config.optimizations.cuda {
@@ -127,7 +132,6 @@ async fn main() {
         println!("Creating new Certficate...");
         make_root_cert(&configdir, &config)
     };
-
     let proxy = MitmProxy::new(
         // This is the root cert that will be used to sign the fake certificates
         Some(root_cert),
@@ -136,6 +140,7 @@ async fn main() {
         .with_intra_threads(config.optimizations.threads/2).unwrap().commit_from_file(format!("{}vits-classifier.onnx", execdir).as_str()).unwrap(),
         Session::builder().unwrap().with_optimization_level(GraphOptimizationLevel::Level3).unwrap()
         .with_intra_threads(config.optimizations.threads/4).unwrap().commit_from_file(format!("{}detector.onnx", execdir).as_str()).unwrap(),
+        config.site_reaction_settings,
         execdir
     );
     let client = DefaultClient::new(
@@ -146,7 +151,7 @@ async fn main() {
             .unwrap(),
     );
     let server = proxy
-        .bind((config.ip.clone(), config.port), move |_client_addr, req, classifier, detector, execdir| {
+        .bind((config.ip.clone(), config.port), move |_client_addr, req, classifier, detector, site_reactions, execdir| {
             let client = client.clone();
             async move {
                 let uri = req.uri().clone();
@@ -154,11 +159,16 @@ async fn main() {
                 // TODO: Check what the user is sending out... 
 
                 let (res, _upgrade) = client.send_request(req).await?;
-
-                println!("{} -> {}", uri.host().unwrap(), res.status());
+                let uri_domain = uri.host().unwrap();
+                println!("{} -> {}", uri_domain, res.status());
                 let default_content_type: HeaderValue = HeaderValue::from_str("application/octet-stream").unwrap();
+                let default_content_encoding: HeaderValue = HeaderValue::from_str("none").unwrap();
                 //Check if the data is a image via Content-Type Header
                 let content_type = res.headers().get(CONTENT_TYPE).unwrap_or_else(||{&default_content_type}).clone();
+                //Check if the data is compressed via Content-Encoding Header
+                let content_encoding = res.headers().get(CONTENT_ENCODING).unwrap_or_else(||{&default_content_encoding}).clone();
+                //Get site domain's settings 
+                println!("Site-reaction: {:?}", site_reactions.get(&yaml::Yaml::from_str(uri_domain)).is_some());
                 //Grab original response HTTP version for Spoofing
                 let http_v = res.version().clone();
                 //Convert Body Stream into bytes
@@ -168,16 +178,30 @@ async fn main() {
                     body.extend(chunk.into_data().unwrap());
                 }
                 if content_type == "image/jpeg" || content_type == "image/png" || content_type == "image/webp" {
-                    println!("Image Detected");
+                    let mut  end_stats = String::new();
+                    println_buffer(&mut end_stats, "Image Detected");
                     let now = Instant::now();
 
                     //Process the img
-                    let mut input_img = opencv::imgcodecs::imdecode(
-                        &opencv::core::Mat::from_slice(&body.to_vec()).unwrap(),
-                        IMREAD_COLOR,
-                    ).unwrap();
-                    let after_decoding = now.elapsed();
-                    println!("  after_decoding: {:?}", after_decoding);
+                    let mut input_img: Mat = if content_encoding == "gzip" {
+                        println_buffer(&mut end_stats, "  Compression");
+                        let mut stor: Vec<u8> = Vec::new();
+                        let indat = &body.to_vec()[..];
+                        let mut decoder = GzDecoder::new(indat);
+                        let decode_result = decoder.read_to_end(&mut stor);
+                        if decode_result.is_err() {
+                            panic!("Compressed Image is not extractable! File an issue pls.");
+                        }
+                        opencv::imgcodecs::imdecode(
+                            &opencv::core::Mat::from_slice(&stor).unwrap(),
+                            IMREAD_COLOR,
+                        ).unwrap()
+                    } else {
+                        opencv::imgcodecs::imdecode(
+                            &opencv::core::Mat::from_slice(&body.to_vec()).unwrap(),
+                            IMREAD_COLOR,
+                        ).unwrap()
+                    };
                     let input_img_w: i32 = input_img.cols();
                     let input_img_h: i32 = input_img.rows();
                     if input_img_h > 60 || input_img_w > 60 {
@@ -187,23 +211,17 @@ async fn main() {
                         //Convert Image to a Tensor
                         let resized_img: Mat = blob_from_image(&input_img, 1f64/255f64, Size::new(640, 640), Scalar::new(0.0,0.0,0.0,0.0), true, false, CV_32F).unwrap();
                         let input_tensor = ort::Tensor::from_array(([1usize,3,640,640], resized_img.data_typed::<f32>().unwrap())).unwrap();
-                        let after_resize_unlock = now.elapsed() - after_decoding;
-                        println!("  after_resize: {:?}", after_resize_unlock);
                         //Run the Human Detector (YOLOv11) on the Image Tensor
                         let output_tensor: SessionOutputs = detector.run(inputs!["images" => input_tensor].unwrap()).unwrap();
                         let outputs = output_tensor["output0"].try_extract_tensor::<f32>().unwrap().view().t().to_owned();
-                        let after_det = now.elapsed() - after_resize_unlock - after_decoding;
-                        println!("  after_det: {:?}", after_det);
                         //Run post processing on Human Detector into Vector
                         let boxes = process_yolo_output(outputs, 640, 640);
-                        let after_det_process = now.elapsed() - after_det - after_resize_unlock - after_decoding;
-                        println!("  after_det_process: {:?}", after_det_process);
                         let mut replace_image = false;
                         for i in &boxes {
                             if i.4 > config.threasholds.humans as f32 {
                                 //Run NSFW Classification on All Humans Detected
                                 let metrix = classify_image(&classifier, &input_img, Rect::from_points(Point::new((i.0*resize_w_scale) as i32, (i.1*resize_h_scale) as i32), Point::new((i.2*resize_w_scale) as i32, (i.3*resize_h_scale) as i32)));
-                                println!("  Human Metrics: {:?}", metrix);
+                                println_buffer(&mut end_stats, &format!("  Human Metrics: {:?}", metrix));
                                 if metrix[1] > config.threasholds.hentai as f32 || metrix[3] > config.threasholds.porn as f32 || metrix[4] > config.threasholds.sexy as f32 {
                                     //Cover Human if NSFW
                                     let _ = rectangle(&mut input_img, Rect::from_points(Point::new((i.0*resize_w_scale) as i32, (i.1*resize_h_scale) as i32), Point::new((i.2*resize_w_scale) as i32, (i.3*resize_h_scale) as i32)), Scalar::new(0.0,0.0,0.0,255.0), -1, 8, 0);
@@ -212,49 +230,42 @@ async fn main() {
                             }
                         }
                         if replace_image  {
-                            let after_class_process = now.elapsed() - after_det_process - after_det - after_resize_unlock - after_decoding;
-                            println!("  after_class_process: {:?}", after_class_process);
                             //Replace Orginal Image with Scrubbed Image
-                            println!("  Image is NSFW: Edited");
+                            println_buffer(&mut end_stats, "  Image is NSFW: Edited");
                             let mut bytes = Vector::new();
                             let _ = opencv::imgcodecs::imencode(if content_type == "image/png" {".png"} else if content_type == "image/webp" {".webp"} else {".jpg"}, &input_img, &mut bytes, &opencv::core::Vector::new());
                             body = BytesMut::from(bytes.as_slice());
                             parts.headers.insert(CONTENT_LENGTH, body.len().into());
-                            let after_image_replace = now.elapsed() - after_class_process - after_det_process - after_det - after_resize_unlock - after_decoding;
-                            println!("  after_image_replace: {:?}", after_image_replace);
+                            //parts.headers.insert("LustBlock-Tagged", 1.into());
                         } else {
-                            println!("  Image is OK: Allowed");
+                            println_buffer(&mut end_stats, "  Image is OK: Allowed");
+                            //parts.headers.insert("LustBlock-Tagged", 0.into());
                         }
                         //If the Human Detector does not find any humans, then Classifier runs on Whole Image
                         if boxes.is_empty() {
                             let metrix = classify_image(&classifier, &input_img, Rect::from_points(Point::new(0, 0), Point::new(input_img.cols(), input_img.rows())));
-                            let after_class_process = now.elapsed() - after_det_process - after_det - after_resize_unlock - after_decoding;
-                            println!("  after_class_process: {:?}", after_class_process);
-                            println!("  Overall Metrics: {:?}", metrix);
+                            println_buffer(&mut end_stats, &format!("  Overall Metrics: {:?}", metrix));
                             if metrix[1] > config.threasholds.hentai as f32 || metrix[3] > config.threasholds.porn as f32 || metrix[4] > config.threasholds.sexy as f32 {
                                 //Replace Whole Image with Distraction
                                 let mut bytes = Vector::new();
-                                let replacement = opencv::imgcodecs::imread(&format!("{:?}distraction.jpg", execdir), 0).unwrap();
+                                let replacement = opencv::imgcodecs::imread(&format!("{}distraction.jpg", execdir), 0).unwrap();
                                 let _ = opencv::imgcodecs::imencode(if content_type == "image/png" {".png"} else if content_type == "image/webp" {".webp"} else {".jpg"}, &replacement, &mut bytes, &opencv::core::Vector::new());
                                 body = BytesMut::from(bytes.as_slice());
-                                println!("  Image is NSFW: Blocked");
-                                let after_image_replace = now.elapsed() - after_class_process - after_det_process - after_det - after_resize_unlock - after_decoding;
-                                println!("  after_image_replace: {:?}", after_image_replace);
+                                println_buffer(&mut end_stats, "  Image is NSFW: Blocked");
+                                parts.headers.insert("LustBlock-Tagged", 1.into());
                             } else {
-                                println!("  Image is OK: Allowed")
-                            }
-                        } else {
-                            if !replace_image  {
-                                let after_class_process = now.elapsed() - after_det_process - after_det - after_resize_unlock - after_decoding;
-                                println!("  after_class_process: {:?}", after_class_process);
+                                println_buffer(&mut end_stats, "  Image is OK: Allowed");
+                                parts.headers.insert("LustBlock-Tagged", 0.into());
                             }
                         }
-                        println!("  Time: {:?}", now.elapsed());
+                        println_buffer(&mut end_stats, &format!("  Time: {:?}", now.elapsed()));
                     } else {
-                        println!("  Image is Too Small: Allowed");
+                        println_buffer(&mut end_stats, "  Image is Too Small: Allowed");
+                        parts.headers.insert("LustBlock-Tagged", 0.into());
                     }
+                    //Finish the recognition by printing the buffered stats
+                    print!("{}", &end_stats);
                 }
-
                 //Reconstruct and return response 
                 let mut after = Response::<Full<Bytes>>::from_parts(parts, Full::new(body.into()));
                 *after.version_mut() = http_v;
@@ -333,9 +344,43 @@ fn make_root_cert(configdir: &String, config: &Config) -> rcgen::CertifiedKey {
     }
     rcgen::CertifiedKey { cert, key_pair }
 }
+
+//Decodes reaction settings from String to u8 
+fn encode_reaction (input: &str) -> u8 {
+    let trimmed_input = input.trim();
+    if trimmed_input == "hc" {
+        2
+    } else if trimmed_input == "h" {
+        1
+    } else if trimmed_input == "c" {
+        0
+    } else if trimmed_input == "w" {
+        3
+    } else if trimmed_input == "b" {
+        4
+    } else {
+        panic!("One of the reaction values is impossible to fullfil.");
+    }
+}
+
+//Adds on to console buffer to be released all at once for comprehensible output 
+fn println_buffer (buffer: &mut String, print: &str) {
+    buffer.push_str(print);
+    buffer.push_str("\n");
+}
+
+//Runs NSFW Classification on a image or part of image
 fn classify_image (model: &Session, image: &Mat, crop: Rect) -> Vec<f32> {
+    //If bounding box resizing is slightly off, give it a nudge.
+    let mut crop_checked = crop.clone();
+    if crop.x+crop.width > image.cols() {
+        crop_checked.width-=1;
+    }
+    if crop.y+crop.height > image.rows() {
+        crop_checked.height-=1;
+    }
     //Reformat Image to Classifer Model Input
-    let resized_img: Mat = blob_from_image(&image.roi(crop).unwrap(), 1f64/255f64, Size::new(224, 224), Scalar::new(0.0,0.0,0.0,0.0), true, false, CV_32F).unwrap();
+    let resized_img: Mat = blob_from_image(&image.roi(crop_checked).unwrap(), 1f64/255f64, Size::new(224, 224), Scalar::new(0.0,0.0,0.0,0.0), true, false, CV_32F).unwrap();
     let input_tensor = ort::Tensor::from_array(([1usize,3,224,224], resized_img.data_typed::<f32>().unwrap())).unwrap();
     //Perform Inference
     let output_tensor: SessionOutputs = model.run(inputs!["pixel_values" => input_tensor].unwrap()).unwrap();

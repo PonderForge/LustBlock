@@ -16,11 +16,12 @@ hyper = { version = "=1.0.1", features = ["http1", "http2", "server", "client"] 
 http-body-util = "0.1.0"
 bytes = "1.7.1"
 rand = "0.8.5"
-serde_json = "1.0.128"
 dirs-next = "2.0.0"
 windows-registry = "0.2.0"
 signal-hook = "0.3.17"
 opencv = {version = "0.93.3", default-features = false , features = ["clang-runtime", "imgcodecs", "imgproc", "dnn"]}
+yaml-rust2 = "0.9"
+flate2 = "1.0.34"
 
 [build-dependencies]
 winresource = "0.1.17"
