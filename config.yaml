@@ -1,6 +1,6 @@
 # LustBlock Config File
 # Mode is either Server or Client, Server only starts a proxy server, while Client only works on windows to auto enable/disable the proxy on machine
-mode: "client"
+mode: "server"
 # If Mode is set to Server, you can change the ip and port like below
 server_settings: 
   ip: "0.0.0.0"
@@ -32,7 +32,7 @@ optimizations:
 #   'w' means don't run any detection, this site is defintely safe, aka whitelist
 #   'b' means don't run any detection, this site is should burn I don't ever want to see it again, aka blacklist
 # 'h' and 'c' can be ran together, while 'w' and 'b' override any other settings, using 'w' and 'b' together might end the world ;)
+# Note: Most sites store their images on a seperate domain like nytimes.com stores images on static01.nyt.com
 default_reaction: "hc"
 site_reaction_settings:
-  example.com: "w"
-  google.com: "b"
+  raw.githubusercontent.com: "c"

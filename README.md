@@ -1,5 +1,5 @@
 # LustBlock
- A 93% accurate, ONNX-based, NSFW image proxy, to filter sexual images from your browser
+Project Taharah: High Speed Porn and Sexy Image Filter on the your Browser! 
 ![Logo and replacement image for the proxy](https://raw.githubusercontent.com/PonderForge/LustBlock/main/distraction.jpg)
 # Install
 ## Linux
@@ -34,7 +34,7 @@ If you want to compile with more of ONNX's Execution providers such as TensorRT,
 `cargo build`
 4. Go to the target/debug directory and run LustBlock
 # Configuration 
-We have 2 methods of configuration, either via config.json which exposes basic config, or via recompilation.
+We have 2 methods of configuration, either via config.yaml which exposes basic config, or via recompilation.
 ## Execution Providers
 LustBlock uses the ORT, an ONNX library for Rust, which provides many different execution providers, or modules that make the AI Proxy run faster. CUDA is included by default in releases and configurable via config.json, the rest of the execution providers you must compile yourself.
 You can add one by:
