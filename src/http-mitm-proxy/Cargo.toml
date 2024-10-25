@@ -12,7 +12,7 @@ tokio = { version = "1.34.0", features = [
     "rt-multi-thread",
     "parking_lot",
     "io-util",
-    "net"
+    "net",
 ] }
 hyper = { version = "=1.0.1", features = ["http1", "http2", "server", "client"] }
 futures = "0.3.29"
@@ -27,6 +27,7 @@ hyper-util = { version = "0.1.1", features = ["tokio"] }
 native-tls = { version = "0.2.12", features = ["alpn"] }
 thiserror = "1.0.62"
 ort = { version = "2.0.0-rc.2", features = ["cuda", "load-dynamic"] }
+yaml-rust2 = "0.9"
 
 [dev-dependencies]
 axum = { version = "0.7.2", features = ["http2"] }
