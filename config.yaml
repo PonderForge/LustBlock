@@ -1,6 +1,6 @@
 # LustBlock Config File
 # Mode is either Server or Client, Server only starts a proxy server, while Client only works on windows to auto enable/disable the proxy on machine
-mode: "server"
+mode: "client"
 # If Mode is set to Server, you can change the ip and port like below
 server_settings: 
   ip: "0.0.0.0"
@@ -12,9 +12,9 @@ server_settings:
 # Too high of threasholds may cause false negatives allowing sexual images or humans to slip though LustBlock.
 # Too low of threasholds may cause false positives which may accidentally identify neutral people or images as sexual
 detect_threasholds:
-  porn: 0.6
-  hentai: 0.6
-  sexual: 0.5
+  porn: 0.1
+  hentai: 0.1
+  sexual: 0.1
   humans: 0.2
 # In order to speed up LustBlock recognition, we have options to utilize any special hardware you may have.
 # If you have a multi cored CPU, set threads to the number of hardware threads it's supports.
@@ -35,4 +35,4 @@ optimizations:
 # Note: Most sites store their images on a seperate domain like nytimes.com stores images on static01.nyt.com
 default_reaction: "hc"
 site_reaction_settings:
-  raw.githubusercontent.com: "c"
+  clarkcollege.instructure.com: "w"
