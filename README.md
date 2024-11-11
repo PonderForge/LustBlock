@@ -1,6 +1,7 @@
 [<img src="https://raw.githubusercontent.com/PonderForge/LustBlock/main/Logo.png" width="400">](https://raw.githubusercontent.com/PonderForge/LustBlock/main/Logo.png)\
 High Speed AI Porn and Sexy Image Proxy Filter directly on your Computer! 
-[demo](https://raw.githubusercontent.com/PonderForge/LustBlock/main/demo.png)
+![demo](https://raw.githubusercontent.com/PonderForge/LustBlock/main/demo.gif)\
+(We are not associated with clideo.com, we just don't have a good video editor)
 # Install
 ## Ubuntu - Noble or Newer
 1. Go to our latest release and download it.\
