@@ -15,7 +15,8 @@ You can run it by typing: `lustblock`
 `wget https://github.com/PonderForge/LustBlock/releases/download/v0.1.0/linux-all-x64.tar.gz -o lustblock.tar.gz`
 2. Unzip/Extract it using your favorite extractor
 `tar -xvzf lustblock.tar.gz`
-3. Change into the release directory and run the main program
+3. Install OpenCV lib via system package manager
+4. Change into the release directory and run the main program
 You can run it using `cd lustblock && ./lustblock`
 ## Windows
 1. Download windows-x64-setup.exe
