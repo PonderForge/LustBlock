@@ -1,5 +1,6 @@
 [<img src="https://raw.githubusercontent.com/PonderForge/LustBlock/main/Logo.png" width="400">](https://raw.githubusercontent.com/PonderForge/LustBlock/main/Logo.png)\
 High Speed AI Porn and Sexy Image Proxy Filter directly on your Computer! 
+[demo](https://raw.githubusercontent.com/PonderForge/LustBlock/main/demo.png)
 # Install
 ## Ubuntu - Noble or Newer
 1. Go to our latest release and download it.\
@@ -18,7 +19,8 @@ You can run it using `cd lustblock && ./lustblock`
 ## Windows
 1. Download windows-x64-setup.exe
 2. Follow instructions through the prompts
-3. Skip the Post install below, if you are only installing for your system
+3. Clear Your Browser Cache
+4. Skip the Post install below, if you are only installing for your system
 ## Post Install
 1. Configure your operating system to use the proxy, via the server's local or public IP, as set per the config.yaml:
 - On Ubuntu, follow [this tutorial](https://phoenixnap.com/kb/ubuntu-proxy-settings)
